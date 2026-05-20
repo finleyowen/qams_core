@@ -90,11 +90,85 @@ impl ScorecardComponent<&HashMap<String, String>> for Scorecard {
     }
 }
 
+impl Scorecard {
+    /// Parses a scorecard from a CSV string.
+    ///
+    /// Format:
+    /// - Header row: empty first cell, then option names (must be unique)
+    /// - Each subsequent row: criterion name in first cell, then per-option values
+    ///   - A number   → `Points(n)`
+    ///   - `"N"`      → `NotApplicable`
+    ///   - `"F"`      → `Autofail`
+    ///   - empty      → option not available on this criterion (omitted)
+    pub fn from_csv_string(csv: &str) -> Result<Self, String> {
+        let mut lines = csv.lines();
+
+        // --- header row ---
+        let header_line = lines.next().ok_or("CSV is empty")?;
+        let header_cells: Vec<&str> = header_line.split(',').collect();
+        // first cell is the top-left corner (ignored)
+        let option_names: Vec<&str> = header_cells[1..].to_vec();
+
+        // Enforce unique option names
+        {
+            let mut seen = std::collections::HashSet::new();
+            for name in &option_names {
+                if !seen.insert(*name) {
+                    return Err(format!("Duplicate option name: '{name}'"));
+                }
+            }
+        }
+
+        // --- criterion rows ---
+        let mut criteria: HashMap<String, Criterion> = HashMap::new();
+
+        for (row_idx, line) in lines.enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let cells: Vec<&str> = line.split(',').collect();
+            let crit_name = cells[0];
+            if crit_name.is_empty() {
+                return Err(format!("Row {} has an empty criterion name", row_idx + 2));
+            }
+            if criteria.contains_key(crit_name) {
+                return Err(format!("Duplicate criterion name: '{crit_name}'"));
+            }
+
+            let mut options: HashMap<String, CriterionScore> = HashMap::new();
+
+            for (col_idx, opt_name) in option_names.iter().enumerate() {
+                let cell = cells.get(col_idx + 1).copied().unwrap_or("").trim();
+                let score = match cell {
+                    "" => continue, // option not available on this criterion
+                    "N" => CriterionScore::NotApplicable,
+                    "F" => CriterionScore::Autofail,
+                    other => {
+                        let points: PointsType = other.parse().map_err(|_| {
+                            format!(
+                                "Invalid cell value '{}' at criterion '{}', option '{}'",
+                                other, crit_name, opt_name
+                            )
+                        })?;
+                        CriterionScore::Points(points)
+                    }
+                };
+                options.insert(opt_name.to_string(), score);
+            }
+
+            criteria.insert(crit_name.to_string(), Criterion { options });
+        }
+
+        Ok(Scorecard { criteria })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use crate::{Criterion, CriterionScore, Scorecard, ScorecardComponent};
 
-use crate::{Criterion, CriterionScore, Scorecard, ScorecardComponent};
+    const VSC1_CSV: &str = include_str!("../test_artifacts/vsc1.csv");
 
     #[test]
     fn basic_criterion_test() {
@@ -210,6 +284,60 @@ use crate::{Criterion, CriterionScore, Scorecard, ScorecardComponent};
         ]);
         assert!(sc.get_score(&sel3) == 0.0);
     }
-}
 
-//
+    #[test]
+    fn from_csv_vsc1() {
+        let sc = Scorecard::from_csv_string(VSC1_CSV).expect("parse should succeed");
+
+        // crit1: YES=1, NO=0, N/A=NotApplicable, FYI=1
+        // crit3: YES=1, NO=0  (N/A and FYI absent)
+
+        // Perfect score on both criteria
+        let sel_perfect: HashMap<String, String> = HashMap::from([
+            ("crit1".into(), "YES".into()),
+            ("crit3".into(), "YES".into()),
+        ]);
+        // denom = max(crit1) + max(crit3) = 1 + 1 = 2; num = 1 + 1 = 2
+        assert_eq!(sc.get_score(&sel_perfect), 1.0);
+
+        // Zero score
+        let sel_zero: HashMap<String, String> = HashMap::from([
+            ("crit1".into(), "NO".into()),
+            ("crit3".into(), "NO".into()),
+        ]);
+        assert_eq!(sc.get_score(&sel_zero), 0.0);
+
+        // N/A on crit1 removes it from denominator; crit3 YES → 1/1 = 1.0
+        let sel_na: HashMap<String, String> = HashMap::from([
+            ("crit1".into(), "N/A".into()),
+            ("crit3".into(), "YES".into()),
+        ]);
+        assert_eq!(sc.get_score(&sel_na), 1.0);
+
+        // FYI on crit1 counts as 1 point (same as YES); denom for crit1 = 1
+        let sel_fyi: HashMap<String, String> = HashMap::from([
+            ("crit1".into(), "FYI".into()),
+            ("crit3".into(), "NO".into()),
+        ]);
+        // num = 1 + 0 = 1, denom = 1 + 1 = 2
+        assert_eq!(sc.get_score(&sel_fyi), 0.5);
+    }
+
+    #[test]
+    fn from_csv_duplicate_option_error() {
+        let csv = ",A,A\ncrit1,1,0\n";
+        assert!(Scorecard::from_csv_string(csv).is_err());
+    }
+
+    #[test]
+    fn from_csv_duplicate_criterion_error() {
+        let csv = ",YES,NO\ncrit1,1,0\ncrit1,1,0\n";
+        assert!(Scorecard::from_csv_string(csv).is_err());
+    }
+
+    #[test]
+    fn from_csv_invalid_cell_error() {
+        let csv = ",YES,NO\ncrit1,1,BAD\n";
+        assert!(Scorecard::from_csv_string(csv).is_err());
+    }
+}
