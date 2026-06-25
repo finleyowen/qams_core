@@ -352,6 +352,20 @@ body {{ font-family: var(--font); color: var(--ink); background: var(--surface);
 .fill.is-autofail {{ background: var(--danger); }}
 .score-frac {{ font-size: 12px; color: var(--ink-soft); margin-top: 5px; }}
 
+/* adjusted score */
+.adj-row {{ display: flex; align-items: center; gap: 8px; margin-top: 10px; }}
+.adj-row label {{ font-size: 12px; font-weight: 600; color: var(--ink-mid); white-space: nowrap; }}
+.adj-input {{
+  width: 72px; padding: 5px 8px; font-family: var(--font); font-size: 13px;
+  color: var(--ink); border: 1px solid var(--rule); border-radius: var(--radius);
+  outline: none; transition: border-color .15s; text-align: right;
+}}
+.adj-input:focus {{ border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-bg); }}
+.adj-input:disabled {{ background: var(--surface); color: var(--ink-soft); cursor: not-allowed; }}
+.adj-reset {{ background: none; border: none; cursor: pointer; font-size: 12px; color: var(--ink-soft); padding: 2px 4px; border-radius: 3px; transition: color .12s; display: none; }}
+.adj-reset:hover {{ color: var(--danger); }}
+.adj-reset.visible {{ display: inline; }}
+
 /* autofail banner */
 .autofail-banner {{ display: none; align-items: center; gap: 8px; padding: 11px 14px; background: var(--danger-bg); border: 1px solid #f5c6c6; border-radius: var(--radius); margin-bottom: 20px; font-size: 13px; color: var(--danger); font-weight: 500; }}
 .autofail-banner.visible {{ display: flex; }}
@@ -453,6 +467,13 @@ body {{ font-family: var(--font); color: var(--ink); background: var(--surface);
       <div class="score-meta-label">Score</div>
       <div class="track"><div class="fill" id="score-fill" style="width:0%"></div></div>
       <div class="score-frac" id="score-frac">Answer all criteria to see score</div>
+      <div class="adj-row">
+        <label for="adj-score">Adjusted %</label>
+        <input type="number" id="adj-score" class="adj-input" min="0" max="100"
+               placeholder="—" disabled oninput="onAdjInput()">
+        <button type="button" class="adj-reset" id="adj-reset"
+                onclick="clearAdj()" title="Clear adjustment">&#x2715;</button>
+      </div>
     </div>
   </div>
 
@@ -520,6 +541,8 @@ function recalc() {{
     pctEl.className    = "score-pct";
     fillEl.className   = "fill";
     banner.classList.remove("visible");
+    document.getElementById("adj-score").disabled = true;
+    clearAdj();
     return;
   }}
   if (autofail) {{
@@ -529,6 +552,8 @@ function recalc() {{
     pctEl.className    = "score-pct is-autofail";
     fillEl.className   = "fill is-autofail";
     banner.classList.add("visible");
+    document.getElementById("adj-score").disabled = false;
+    clearAdj();
     return;
   }}
   banner.classList.remove("visible");
@@ -541,6 +566,24 @@ function recalc() {{
     : `${{num}}/${{denom}} pts`;
   pctEl.className  = "score-pct";
   fillEl.className = "fill";
+  document.getElementById("adj-score").disabled = false;
+  clearAdj();
+}}
+
+function onAdjInput() {{
+  const el  = document.getElementById("adj-score");
+  const rst = document.getElementById("adj-reset");
+  // Clamp to 0–100
+  if (el.value !== "" && (el.value < 0 || el.value > 100)) {{
+    el.value = Math.min(100, Math.max(0, el.value));
+  }}
+  rst.classList.toggle("visible", el.value !== "");
+}}
+
+function clearAdj() {{
+  const el = document.getElementById("adj-score");
+  el.value = "";
+  document.getElementById("adj-reset").classList.remove("visible");
 }}
 
 function toggleComment(uid) {{
@@ -561,6 +604,8 @@ function resetForm() {{
     a.previousElementSibling.setAttribute("aria-expanded", "false");
     a.previousElementSibling.textContent = "+ comment";
   }});
+  clearAdj();
+  document.getElementById("adj-score").disabled = true;
   recalc();
 }}
 
@@ -588,10 +633,16 @@ function saveReview() {{
     const txt = document.querySelector(`#comment-${{uid}} textarea`).value.trim();
     if (txt) comments[crit.name] = txt;
   }}
-  const review = {{ agent, reviewer, date, selections, comments }};
-  // The CLI writes this JSON to reviews/<agent>_<date>_<timestamp>.json
-  console.log(JSON.stringify(review, null, 2));
-  alert("Review saved for " + agent + " (" + date + ").\nSee console for JSON.");
+  const adjEl  = document.getElementById("adj-score");
+  const score  = parseFloat(document.getElementById("score-pct").textContent) || 0;
+  const review = {{ agent, reviewer, date, selections, comments, score }};
+  if (adjEl.value !== "") review.adj_score = parseFloat(adjEl.value);
+  const filename = agent.replace(/\s+/g, "_") + "_" + date + ".json";
+  const blob = new Blob([JSON.stringify(review, null, 2)], {{ type: "application/json" }});
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement("a");
+  a.href = url; a.download = filename; a.click();
+  URL.revokeObjectURL(url);
 }}
 
 document.addEventListener("DOMContentLoaded", () => {{
@@ -692,9 +743,8 @@ mod tests {
     const VSC1_CSV: &str = include_str!("../test_artifacts/vsc1.csv");
 
     const TEST_AGENTS: &[&[&str]] = &[
-        &["agent1", "metadata1", "metadata2"],
-        &["agent2", "metadata3", "metadata4"],
-        &["agent3", "metadata5", "metadata6"]
+        &["Alice Nguyen", "Team A"],
+        &["Ben Carter"],
     ];
 
     #[test]
