@@ -1,0 +1,29 @@
+@startuml ucd
+
+actor "Quality Assurance Officer" as qa
+actor "Quality Assurance Team Leader" as qal
+actor "Agent" as ag
+actor "Stakeholder" as sh
+
+qal --|> qa
+
+rectangle "QAMS" {
+    (Create/edit scorecard) as uc1
+    (Conduct review) as uc2
+    (Generate report) as uc3
+    (View report) as uc4
+}
+
+qal --> uc1
+
+qa --> uc2
+qa --> uc3
+
+sh --> uc4
+ag --> uc4
+
+uc2 ..> uc1: <<includes>>
+uc3 ..> uc2: <<includes>>
+uc4 ..> uc3: <<includes>>
+
+@enduml

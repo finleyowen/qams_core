@@ -1,4 +1,4 @@
-# Scorecard CSV Representation
+# QAMS Scorecard CSV Representation
 
 QAMS uses the [CSV](https://en.wikipedia.org/wiki/Comma-separated_values) format to import scorecards. In the CSV scorecard representation:
 - The header row stores the names of the options available on all criteria in the scorecard. They must be unique
