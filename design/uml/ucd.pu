@@ -1,5 +1,7 @@
 @startuml ucd
 
+skinparam linetype ortho
+
 actor "Quality Assurance Officer" as qa
 actor "Quality Assurance Team Leader" as qal
 actor "Agent" as ag
