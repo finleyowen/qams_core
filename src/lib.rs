@@ -37,7 +37,7 @@ impl ScorecardComponent<&str> for Criterion {
 
     fn get_denominator(&self, sel: &str) -> PointsType {
         match &self.options[sel] {
-            CriterionScore::Points(_) => {
+            CriterionScore::Points(_) | CriterionScore::Autofail => {
                 let mut denom = 0;
                 for option in self.options.values() {
                     if let CriterionScore::Points(n_points) = option
