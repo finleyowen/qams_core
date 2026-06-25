@@ -179,17 +179,37 @@ impl Scorecard {
     /// optional per-criterion comments to JSON, which the CLI writes to the
     /// `reviews/` directory.
     ///
+    /// `agents` mirrors the agents CSV: each inner slice is one row, where
+    /// `agents[n][0]` is the agent's unique identifier (used as the option
+    /// value) and any further elements are metadata columns, stored as
+    /// `data-meta-N` attributes on the `<option>` element for future use.
+    ///
     /// Option buttons are styled to reflect their score type:
     /// - **Green**  – the highest-point value on that criterion (full marks)
     /// - **Blue**   – a Points value below the maximum
     /// - **Grey**   – NotApplicable (`N` in the CSV)
     /// - **Red**    – Autofail (`F` in the CSV)
     /// - **Dash**   – option not available on this criterion (no button rendered)
-    pub fn to_html(&self) -> String {
+    pub fn to_html(&self, agents: &[&[&str]]) -> String {
         let option_headers: String = self.option_order
             .iter()
             .map(|o| format!("<th>{}</th>", escape_html(o)))
             .collect();
+
+        let agent_options: String = agents
+            .iter()
+            .filter(|row| !row.is_empty())
+            .map(|row| {
+                let id = escape_html(row[0]);
+                let meta_attrs: String = row[1..]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| format!(" data-meta-{}=\"{}\"", i, escape_html(v)))
+                    .collect();
+                format!("<option value=\"{id}\"{meta_attrs}>{id}</option>")
+            })
+            .collect::<Vec<_>>()
+            .join("\n            ");
 
         let criterion_rows: String = self.criterion_order
             .iter()
@@ -412,6 +432,7 @@ body {{ font-family: var(--font); color: var(--ink); background: var(--surface);
           <label for="agent">Agent</label>
           <select id="agent" name="agent">
             <option value="" disabled selected>Select agent…</option>
+            {agent_options}
           </select>
         </div>
         <div class="field">
@@ -581,6 +602,7 @@ document.addEventListener("DOMContentLoaded", () => {{
 </html>"#,
             option_headers   = option_headers,
             criterion_rows   = criterion_rows,
+            agent_options    = agent_options,
             criteria_js      = self.criteria_js(),
             option_order_js  = self.option_order
                 .iter()
@@ -668,6 +690,12 @@ mod tests {
     use super::{Criterion, CriterionScore, Scorecard, ScorecardComponent};
 
     const VSC1_CSV: &str = include_str!("../test_artifacts/vsc1.csv");
+
+    const TEST_AGENTS: &[&[&str]] = &[
+        &["agent1", "metadata1", "metadata2"],
+        &["agent2", "metadata3", "metadata4"],
+        &["agent3", "metadata5", "metadata6"]
+    ];
 
     #[test]
     fn basic_criterion_test() {
@@ -847,16 +875,15 @@ mod tests {
     #[test]
     fn to_html_is_valid_html_document() {
         let sc = Scorecard::from_csv_string(VSC1_CSV).unwrap();
-        let html = sc.to_html();
+        let html = sc.to_html(TEST_AGENTS);
         assert!(html.starts_with("<!DOCTYPE html>"));
         assert!(html.contains("</html>"));
     }
 
     #[test]
     fn to_html_preserves_criterion_order() {
-        // crit1 must appear before crit3 (CSV row order).
         let sc = Scorecard::from_csv_string(VSC1_CSV).unwrap();
-        let html = sc.to_html();
+        let html = sc.to_html(TEST_AGENTS);
         let pos_crit1 = html.find("crit1").expect("crit1 missing");
         let pos_crit2 = html.find("crit2").expect("crit2 missing");
         assert!(pos_crit1 < pos_crit2, "crit1 should appear before crit2");
@@ -864,9 +891,8 @@ mod tests {
 
     #[test]
     fn to_html_preserves_option_order() {
-        // YES must appear before NO, N/A, FYI in the header (CSV column order).
         let sc = Scorecard::from_csv_string(VSC1_CSV).unwrap();
-        let html = sc.to_html();
+        let html = sc.to_html(TEST_AGENTS);
         let pos_yes = html.find(">YES<").expect("YES header missing");
         let pos_no  = html.find(">NO<").expect("NO header missing");
         let pos_na  = html.find(">N/A<").expect("N/A header missing");
@@ -878,9 +904,8 @@ mod tests {
 
     #[test]
     fn to_html_unavailable_options_render_as_dash() {
-        // crit3 has no N/A or FYI columns — those cells must show the dash placeholder.
         let sc = Scorecard::from_csv_string(VSC1_CSV).unwrap();
-        let html = sc.to_html();
+        let html = sc.to_html(TEST_AGENTS);
         assert!(
             html.contains("opt-unavailable"),
             "unavailable options should use the opt-unavailable class"
@@ -889,28 +914,42 @@ mod tests {
 
     #[test]
     fn to_html_contains_criteria_js_block() {
-        // The JS score calculator must reference each criterion by name.
         let sc = Scorecard::from_csv_string(VSC1_CSV).unwrap();
-        let html = sc.to_html();
+        let html = sc.to_html(TEST_AGENTS);
         assert!(html.contains("\"crit1\""), "criteria JS block should include crit1");
         assert!(html.contains("\"crit2\""), "criteria JS block should include crit2");
     }
 
     #[test]
     fn to_html_escapes_special_chars() {
-        // Criterion/option names with HTML-special chars must be escaped.
         let csv = ",<YES>&,\"opt\"\ncrit<1>,1,0\n";
         let sc = Scorecard::from_csv_string(csv).unwrap();
-        let html = sc.to_html();
+        let html = sc.to_html(TEST_AGENTS);
         assert!(!html.contains("<YES>"),   "raw < > in option name should be escaped");
         assert!(!html.contains("crit<1>"), "raw < > in criterion name should be escaped");
         assert!(html.contains("&lt;"),     "escaped < should appear as &lt;");
     }
 
     #[test]
+    fn to_html_agent_options() {
+        let sc = Scorecard::from_csv_string(VSC1_CSV).unwrap();
+        let agents: &[&[&str]] = &[
+            &["Alice Nguyen", "Team A"],
+            &["Ben Carter"],
+            &["Clara & <Singh>"],
+        ];
+        let html = sc.to_html(agents);
+        assert!(html.contains("value=\"Alice Nguyen\""),    "identifier rendered as option value");
+        assert!(html.contains("data-meta-0=\"Team A\""),    "metadata stored as data attribute");
+        assert!(html.contains("Ben Carter"),                "agent with no metadata renders");
+        assert!(!html.contains("Clara & <Singh>"),          "raw special chars must be escaped");
+        assert!(html.contains("Clara &amp; &lt;Singh&gt;"), "agent name HTML-escaped");
+    }
+
+    #[test]
     fn sanity_check_vsc1() {
         let sc = Scorecard::from_csv_string(VSC1_CSV).unwrap();
-        let html = sc.to_html();
+        let html = sc.to_html(TEST_AGENTS);
         fs::write("test_artifacts/vsc1.html", html).unwrap();
     }
 }
