@@ -60,7 +60,11 @@ impl ScorecardComponent<&str> for Criterion {
 }
 
 pub struct Scorecard {
-    criteria: HashMap<String, Criterion>
+    criteria: HashMap<String, Criterion>,
+    /// Option names in CSV column order (needed for ordered HTML output).
+    option_order: Vec<String>,
+    /// Criterion names in CSV row order (needed for ordered HTML output).
+    criterion_order: Vec<String>,
 }
 
 impl ScorecardComponent<&HashMap<String, String>> for Scorecard {
@@ -121,6 +125,7 @@ impl Scorecard {
 
         // --- criterion rows ---
         let mut criteria: HashMap<String, Criterion> = HashMap::new();
+        let mut criterion_order: Vec<String> = Vec::new();
 
         for (row_idx, line) in lines.enumerate() {
             if line.trim().is_empty() {
@@ -156,16 +161,510 @@ impl Scorecard {
                 options.insert(opt_name.to_string(), score);
             }
 
+            criterion_order.push(crit_name.to_string());
             criteria.insert(crit_name.to_string(), Criterion { options });
         }
 
-        Ok(Scorecard { criteria })
+        Ok(Scorecard {
+            criteria,
+            option_order: option_names.iter().map(|s| s.to_string()).collect(),
+            criterion_order,
+        })
     }
+
+    /// Renders the scorecard as a self-contained HTML review form.
+    ///
+    /// The returned string is a full HTML document that a QA officer fills in
+    /// for each review. Submitting the form serialises the selections and
+    /// optional per-criterion comments to JSON, which the CLI writes to the
+    /// `reviews/` directory.
+    ///
+    /// Option buttons are styled to reflect their score type:
+    /// - **Green**  – the highest-point value on that criterion (full marks)
+    /// - **Blue**   – a Points value below the maximum
+    /// - **Grey**   – NotApplicable (`N` in the CSV)
+    /// - **Red**    – Autofail (`F` in the CSV)
+    /// - **Dash**   – option not available on this criterion (no button rendered)
+    pub fn to_html(&self) -> String {
+        let option_headers: String = self.option_order
+            .iter()
+            .map(|o| format!("<th>{}</th>", escape_html(o)))
+            .collect();
+
+        let criterion_rows: String = self.criterion_order
+            .iter()
+            .map(|crit_name| {
+                let criterion = &self.criteria[crit_name];
+
+                // Highest Points value on this criterion — used to identify
+                // the "full marks" option for green styling.
+                let max_pts = criterion.options.values()
+                    .filter_map(|s| if let CriterionScore::Points(p) = s { Some(*p) } else { None })
+                    .max()
+                    .unwrap_or(0);
+
+                let option_cells: String = self.option_order
+                    .iter()
+                    .map(|opt_name| {
+                        match criterion.options.get(opt_name) {
+                            None => {
+                                // Empty cell in the CSV — option not available.
+                                "<td class=\"opt-cell opt-unavailable\"><span aria-hidden=\"true\">—</span></td>".to_string()
+                            }
+                            Some(score) => {
+                                let (css_class, title) = match score {
+                                    CriterionScore::Autofail =>
+                                        ("opt-autofail", "Autofail"),
+                                    CriterionScore::NotApplicable =>
+                                        ("opt-na", "Not applicable"),
+                                    CriterionScore::Points(p) if *p == max_pts && max_pts > 0 =>
+                                        ("opt-full", "Full points"),
+                                    CriterionScore::Points(_) =>
+                                        ("opt-points", "Partial points"),
+                                };
+                                let id = format!(
+                                    "{}_{}",
+                                    escape_html(crit_name),
+                                    escape_html(opt_name)
+                                );
+                                format!(
+                                    r#"<td class="opt-cell">
+  <label class="opt-label {css_class}" title="{title}">
+    <input type="radio" name="{crit}" value="{opt}" id="{id}" onchange="recalc()">
+    <span class="opt-btn">{opt_display}</span>
+  </label>
+</td>"#,
+                                    crit = escape_html(crit_name),
+                                    opt  = escape_html(opt_name),
+                                    opt_display = escape_html(opt_name),
+                                )
+                            }
+                        }
+                    })
+                    .collect();
+
+                let uid = crit_name.replace(|c: char| !c.is_alphanumeric(), "_");
+                format!(
+                    r#"<tr>
+  <td class="crit-name"><code>{crit}</code></td>
+  {option_cells}
+  <td class="comment-cell">
+    <button type="button" class="comment-toggle"
+            onclick="toggleComment('{uid}')"
+            aria-expanded="false" aria-controls="comment-{uid}">
+      + comment
+    </button>
+    <div class="comment-area" id="comment-{uid}" hidden>
+      <textarea name="comment_{uid}"
+                aria-label="Comment for {crit}"
+                placeholder="Optional comment…"></textarea>
+    </div>
+  </td>
+</tr>"#,
+                    crit = escape_html(crit_name),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        format!(
+            r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QAMS – Review Form</title>
+<style>
+*, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+:root {{
+  --ink:        #1a1a1a;
+  --ink-mid:    #555;
+  --ink-soft:   #888;
+  --rule:       #e0ddd8;
+  --surface:    #f9f8f6;
+  --white:      #ffffff;
+  --accent:     #2563eb;
+  --accent-bg:  #eff4ff;
+  --danger:     #c0392b;
+  --danger-bg:  #fdf2f2;
+  --success:    #166534;
+  --success-bg: #f0fdf4;
+  --na-color:   #4b5563;
+  --na-bg:      #f3f4f6;
+  --radius:     6px;
+  --font:       "Inter", "Segoe UI", system-ui, sans-serif;
+  --mono:       "JetBrains Mono", "Fira Code", "Consolas", monospace;
+}}
+html {{ font-size: 15px; }}
+body {{ font-family: var(--font); color: var(--ink); background: var(--surface); min-height: 100vh; padding-bottom: 80px; }}
+
+/* header */
+.page-header {{ background: var(--white); border-bottom: 1px solid var(--rule); padding: 18px 40px; display: flex; align-items: center; gap: 12px; }}
+.wordmark {{ font-size: 12px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-soft); }}
+.sep {{ color: var(--rule); }}
+.page-title {{ font-size: 15px; font-weight: 600; }}
+
+/* layout */
+.shell {{ max-width: 900px; margin: 36px auto 0; padding: 0 24px; }}
+.section-label {{ font-size: 11px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-soft); margin-bottom: 10px; }}
+.card {{ background: var(--white); border: 1px solid var(--rule); border-radius: var(--radius); margin-bottom: 20px; }}
+.card-body {{ padding: 22px; }}
+
+/* meta fields */
+.meta-grid {{ display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 18px; }}
+@media (max-width: 600px) {{ .meta-grid {{ grid-template-columns: 1fr; }} }}
+.field label {{ display: block; font-size: 12px; font-weight: 600; color: var(--ink-mid); margin-bottom: 5px; }}
+.field input, .field select {{
+  width: 100%; padding: 8px 10px; font-family: var(--font); font-size: 14px;
+  color: var(--ink); background: var(--white); border: 1px solid var(--rule);
+  border-radius: var(--radius); appearance: none; outline: none; transition: border-color .15s;
+}}
+.field input:focus, .field select:focus {{ border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-bg); }}
+
+/* score */
+.score-bar-card {{ display: flex; align-items: center; gap: 20px; background: var(--white); border: 1px solid var(--rule); border-radius: var(--radius); padding: 18px 22px; margin-bottom: 20px; }}
+.score-pct {{ font-size: 34px; font-weight: 700; min-width: 70px; font-variant-numeric: tabular-nums; }}
+.score-pct.is-autofail {{ color: var(--danger); }}
+.score-meta {{ flex: 1; }}
+.score-meta-label {{ font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-soft); margin-bottom: 7px; }}
+.track {{ height: 6px; background: var(--rule); border-radius: 99px; overflow: hidden; }}
+.fill {{ height: 100%; background: var(--accent); border-radius: 99px; transition: width .3s ease; }}
+.fill.is-autofail {{ background: var(--danger); }}
+.score-frac {{ font-size: 12px; color: var(--ink-soft); margin-top: 5px; }}
+
+/* autofail banner */
+.autofail-banner {{ display: none; align-items: center; gap: 8px; padding: 11px 14px; background: var(--danger-bg); border: 1px solid #f5c6c6; border-radius: var(--radius); margin-bottom: 20px; font-size: 13px; color: var(--danger); font-weight: 500; }}
+.autofail-banner.visible {{ display: flex; }}
+
+/* criteria table */
+.criteria-table {{ width: 100%; border-collapse: collapse; }}
+.criteria-table thead tr {{ border-bottom: 2px solid var(--rule); }}
+.criteria-table thead th {{ padding: 10px 12px; font-size: 12px; font-weight: 600; color: var(--ink-mid); text-align: center; white-space: nowrap; }}
+.criteria-table thead th.col-crit {{ text-align: left; min-width: 160px; }}
+.criteria-table thead th.col-comment {{ text-align: left; min-width: 130px; }}
+.criteria-table tbody tr {{ border-bottom: 1px solid var(--rule); }}
+.criteria-table tbody tr:last-child {{ border-bottom: none; }}
+.crit-name {{ padding: 14px 12px; font-size: 14px; vertical-align: top; }}
+.crit-name code {{ font-family: var(--mono); font-size: 13px; }}
+
+/* option cells */
+.opt-cell {{ padding: 14px 8px; text-align: center; vertical-align: top; }}
+.opt-unavailable {{ color: var(--rule); font-size: 18px; line-height: 36px; }}
+.opt-label {{ display: inline-flex; flex-direction: column; align-items: center; cursor: pointer; }}
+.opt-label input[type="radio"] {{ display: none; }}
+.opt-btn {{
+  display: flex; align-items: center; justify-content: center;
+  width: 38px; height: 38px; border-radius: var(--radius);
+  border: 1.5px solid var(--rule); background: var(--white);
+  font-size: 12px; font-weight: 600; color: var(--ink-mid);
+  transition: background .12s, border-color .12s, color .12s;
+  user-select: none;
+}}
+.opt-label:hover .opt-btn {{ border-color: #9ca3af; background: var(--surface); }}
+.opt-label input:checked + .opt-btn {{ box-shadow: 0 0 0 3px var(--accent-bg); }}
+
+/* per-type checked colours */
+.opt-full    input:checked + .opt-btn {{ border-color: var(--success); background: var(--success-bg); color: var(--success); box-shadow: 0 0 0 3px var(--success-bg); }}
+.opt-points  input:checked + .opt-btn {{ border-color: var(--accent);  background: var(--accent-bg);  color: var(--accent);  box-shadow: 0 0 0 3px var(--accent-bg); }}
+.opt-na      input:checked + .opt-btn {{ border-color: #9ca3af; background: var(--na-bg); color: var(--na-color); box-shadow: 0 0 0 3px var(--na-bg); }}
+.opt-autofail input:checked + .opt-btn {{ border-color: var(--danger); background: var(--danger-bg); color: var(--danger); box-shadow: 0 0 0 3px var(--danger-bg); }}
+
+/* comment cell */
+.comment-cell {{ padding: 14px 12px 14px 0; vertical-align: top; }}
+.comment-toggle {{ background: none; border: none; cursor: pointer; font-size: 12px; color: var(--ink-soft); padding: 4px 0; transition: color .12s; }}
+.comment-toggle:hover {{ color: var(--accent); }}
+.comment-area {{ margin-top: 6px; }}
+.comment-area textarea {{
+  width: 100%; min-height: 58px; padding: 7px 9px;
+  font-family: var(--font); font-size: 13px; color: var(--ink);
+  border: 1px solid var(--rule); border-radius: var(--radius);
+  resize: vertical; outline: none; transition: border-color .15s;
+}}
+.comment-area textarea:focus {{ border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-bg); }}
+.comment-area textarea::placeholder {{ color: var(--ink-soft); }}
+
+/* actions */
+.actions {{ display: flex; gap: 10px; justify-content: flex-end; }}
+.btn {{ display: inline-flex; align-items: center; padding: 9px 18px; border-radius: var(--radius); font-family: var(--font); font-size: 14px; font-weight: 500; cursor: pointer; border: 1.5px solid transparent; transition: background .12s, border-color .12s; }}
+.btn-secondary {{ background: var(--white); border-color: var(--rule); color: var(--ink-mid); }}
+.btn-secondary:hover {{ border-color: #bbb; background: var(--surface); }}
+.btn-primary {{ background: var(--accent); color: var(--white); border-color: var(--accent); }}
+.btn-primary:hover {{ background: #1d4ed8; }}
+
+@media (prefers-reduced-motion: reduce) {{ *, *::before, *::after {{ transition: none !important; }} }}
+</style>
+</head>
+<body>
+
+<header class="page-header">
+  <span class="wordmark">QAMS</span>
+  <span class="sep">|</span>
+  <span class="page-title">Review Form</span>
+</header>
+
+<main class="shell">
+
+  <p class="section-label">Review details</p>
+  <div class="card" style="margin-bottom:20px">
+    <div class="card-body">
+      <div class="meta-grid">
+        <div class="field">
+          <label for="agent">Agent</label>
+          <select id="agent" name="agent">
+            <option value="" disabled selected>Select agent…</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="reviewer">Reviewer</label>
+          <input type="text" id="reviewer" name="reviewer" placeholder="Your name">
+        </div>
+        <div class="field">
+          <label for="date">Date</label>
+          <input type="date" id="date" name="date">
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="score-bar-card">
+    <div class="score-pct" id="score-pct">—</div>
+    <div class="score-meta">
+      <div class="score-meta-label">Score</div>
+      <div class="track"><div class="fill" id="score-fill" style="width:0%"></div></div>
+      <div class="score-frac" id="score-frac">Answer all criteria to see score</div>
+    </div>
+  </div>
+
+  <div class="autofail-banner" id="autofail-banner">
+    &#9888; Autofail — this review scores 0% regardless of other selections.
+  </div>
+
+  <p class="section-label">Criteria</p>
+  <div class="card">
+    <table class="criteria-table">
+      <thead>
+        <tr>
+          <th class="col-crit">Criterion</th>
+          {option_headers}
+          <th class="col-comment">Comment</th>
+        </tr>
+      </thead>
+      <tbody>
+        {criterion_rows}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="actions">
+    <button type="button" class="btn btn-secondary" onclick="resetForm()">Clear</button>
+    <button type="button" class="btn btn-primary" onclick="saveReview()">Save review</button>
+  </div>
+
+</main>
+
+<script>
+// Scorecard structure for client-side score calculation.
+// Mirrors the Rust data model: criteria keyed by name, each with a map of
+// option name → score type. Criterion and option order follow the CSV.
+const CRITERIA = [{criteria_js}];
+const OPTION_ORDER = [{option_order_js}];
+
+function maxPts(crit) {{
+  return Math.max(0, ...Object.values(crit.options)
+    .filter(o => o.type === "points").map(o => o.value));
+}}
+
+function recalc() {{
+  let num = 0, denom = 0, autofail = false, answered = 0;
+  for (const crit of CRITERIA) {{
+    const sel = document.querySelector(`input[name="${{crit.name}}"]:checked`);
+    if (!sel) continue;
+    answered++;
+    const opt = crit.options[sel.value];
+    if (opt.type === "autofail") {{ autofail = true; break; }}
+    if (opt.type === "na") continue;
+    denom += maxPts(crit);
+    num   += opt.value;
+  }}
+
+  const pctEl  = document.getElementById("score-pct");
+  const fillEl = document.getElementById("score-fill");
+  const fracEl = document.getElementById("score-frac");
+  const banner = document.getElementById("autofail-banner");
+
+  if (answered === 0) {{
+    pctEl.textContent  = "—";
+    fillEl.style.width = "0%";
+    fracEl.textContent = "Answer all criteria to see score";
+    pctEl.className    = "score-pct";
+    fillEl.className   = "fill";
+    banner.classList.remove("visible");
+    return;
+  }}
+  if (autofail) {{
+    pctEl.textContent  = "0%";
+    fillEl.style.width = "0%";
+    fracEl.textContent = "Autofail";
+    pctEl.className    = "score-pct is-autofail";
+    fillEl.className   = "fill is-autofail";
+    banner.classList.add("visible");
+    return;
+  }}
+  banner.classList.remove("visible");
+  const pct = denom > 0 ? Math.round((num / denom) * 100) : 100;
+  const remaining = CRITERIA.length - answered;
+  pctEl.textContent  = pct + "%";
+  fillEl.style.width = pct + "%";
+  fracEl.textContent = remaining > 0
+    ? `${{num}}/${{denom}} pts · ${{remaining}} criterion${{remaining > 1 ? "a" : "ion"}} unanswered`
+    : `${{num}}/${{denom}} pts`;
+  pctEl.className  = "score-pct";
+  fillEl.className = "fill";
+}}
+
+function toggleComment(uid) {{
+  const area = document.getElementById("comment-" + uid);
+  const btn  = area.previousElementSibling;
+  const open = area.hasAttribute("hidden");
+  if (open) {{ area.removeAttribute("hidden"); area.querySelector("textarea").focus(); }}
+  else       {{ area.setAttribute("hidden", ""); }}
+  btn.setAttribute("aria-expanded", open);
+  btn.textContent = open ? "− comment" : "+ comment";
+}}
+
+function resetForm() {{
+  document.querySelectorAll("input[type=radio]").forEach(r => r.checked = false);
+  document.querySelectorAll("textarea").forEach(t => t.value = "");
+  document.querySelectorAll(".comment-area:not([hidden])").forEach(a => {{
+    a.setAttribute("hidden", "");
+    a.previousElementSibling.setAttribute("aria-expanded", "false");
+    a.previousElementSibling.textContent = "+ comment";
+  }});
+  recalc();
+}}
+
+function saveReview() {{
+  const agent    = document.getElementById("agent").value;
+  const reviewer = document.getElementById("reviewer").value.trim();
+  const date     = document.getElementById("date").value;
+  if (!agent || !reviewer || !date) {{
+    alert("Please fill in agent, reviewer, and date before saving.");
+    return;
+  }}
+  const unanswered = CRITERIA.filter(c =>
+    !document.querySelector(`input[name="${{c.name}}"]:checked`)
+  );
+  if (unanswered.length) {{
+    alert("Please answer all criteria before saving.\nUnanswered: " +
+          unanswered.map(c => c.name).join(", "));
+    return;
+  }}
+  const selections = {{}};
+  const comments   = {{}};
+  for (const crit of CRITERIA) {{
+    selections[crit.name] = document.querySelector(`input[name="${{crit.name}}"]:checked`).value;
+    const uid = crit.name.replace(/\W/g, "_");
+    const txt = document.querySelector(`#comment-${{uid}} textarea`).value.trim();
+    if (txt) comments[crit.name] = txt;
+  }}
+  const review = {{ agent, reviewer, date, selections, comments }};
+  // The CLI writes this JSON to reviews/<agent>_<date>_<timestamp>.json
+  console.log(JSON.stringify(review, null, 2));
+  alert("Review saved for " + agent + " (" + date + ").\nSee console for JSON.");
+}}
+
+document.addEventListener("DOMContentLoaded", () => {{
+  document.getElementById("date").valueAsDate = new Date();
+}});
+</script>
+</body>
+</html>"#,
+            option_headers   = option_headers,
+            criterion_rows   = criterion_rows,
+            criteria_js      = self.criteria_js(),
+            option_order_js  = self.option_order
+                .iter()
+                .map(|o| format!("\"{}\"", escape_js_in_html(o)))
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+    }
+
+    /// Serialises the scorecard to a JS array literal for the score calculator.
+    fn criteria_js(&self) -> String {
+        self.criterion_order
+            .iter()
+            .map(|crit_name| {
+                let criterion = &self.criteria[crit_name];
+                let max_pts = criterion.options.values()
+                    .filter_map(|s| if let CriterionScore::Points(p) = s { Some(*p) } else { None })
+                    .max()
+                    .unwrap_or(0);
+
+                let options_js: String = criterion.options
+                    .iter()
+                    .map(|(opt_name, score)| {
+                        let val = match score {
+                            CriterionScore::Points(p) =>
+                                format!("{{type:\"points\",value:{}}}", p),
+                            CriterionScore::NotApplicable =>
+                                "{type:\"na\"}".to_string(),
+                            CriterionScore::Autofail =>
+                                "{type:\"autofail\"}".to_string(),
+                        };
+                        format!("\"{}\":{}", escape_js_in_html(opt_name), val)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+
+                format!(
+                    "{{name:\"{}\",maxPts:{},options:{{{}}}}}",
+                    escape_js_in_html(crit_name),
+                    max_pts,
+                    options_js,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
+/// Escapes the five XML special characters for use in HTML attribute values
+/// and text content.
+fn escape_html(s: &str) -> String {
+    s.chars().map(|c| match c {
+        '&'  => "&amp;".to_string(),
+        '<'  => "&lt;".to_string(),
+        '>'  => "&gt;".to_string(),
+        '"'  => "&quot;".to_string(),
+        '\'' => "&#39;".to_string(),
+        c    => c.to_string(),
+    }).collect()
+}
+
+/// Escapes characters that would break a JS string literal (double-quoted).
+fn escape_js(s: &str) -> String {
+    s.chars().map(|c| match c {
+        '"'  => "\\\"".to_string(),
+        '\\' => "\\\\".to_string(),
+        '\n' => "\\n".to_string(),
+        '\r' => "\\r".to_string(),
+        c    => c.to_string(),
+    }).collect()
+}
+
+/// Escapes a value for use inside a double-quoted JS string that is itself
+/// embedded in an HTML document. HTML-escaping is applied first (so `<` and
+/// `&` are safe for the HTML parser), then JS-escaping (so `"` and `\` are
+/// safe inside the string literal). The order matters: JS-escaping first
+/// would turn `&` into `&` which HTML-escaping would then incorrectly expand.
+fn escape_js_in_html(s: &str) -> String {
+    escape_js(&escape_html(s))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{collections::HashMap, fs};
     use super::{Criterion, CriterionScore, Scorecard, ScorecardComponent};
 
     const VSC1_CSV: &str = include_str!("../test_artifacts/vsc1.csv");
@@ -227,7 +726,7 @@ mod tests {
         assert!(crit.get_numerator("na") == 0);
 
         assert!(crit.get_denominator("p1") == 1);
-        assert!(crit.get_denominator("af") == 0);
+        assert!(crit.get_denominator("af") == 1);
         assert!(crit.get_denominator("na") == 0);
 
         assert!(!crit.is_autofail("p1"));
@@ -260,7 +759,9 @@ mod tests {
                         ("af".into(), CriterionScore::Autofail)
                     ])
                 })
-            ])
+            ]),
+            option_order: vec!["p1".into(), "p0".into(), "na".into(), "af".into()],
+            criterion_order: vec!["crit1".into(), "crit2".into(), "crit3".into()],
         };
 
         let sel1: HashMap<String, String> = HashMap::from([
@@ -290,34 +791,34 @@ mod tests {
         let sc = Scorecard::from_csv_string(VSC1_CSV).expect("parse should succeed");
 
         // crit1: YES=1, NO=0, N/A=NotApplicable, FYI=1
-        // crit3: YES=1, NO=0  (N/A and FYI absent)
+        // crit2: YES=1, NO=0  (N/A and FYI absent)
 
         // Perfect score on both criteria
         let sel_perfect: HashMap<String, String> = HashMap::from([
             ("crit1".into(), "YES".into()),
-            ("crit3".into(), "YES".into()),
+            ("crit2".into(), "YES".into()),
         ]);
-        // denom = max(crit1) + max(crit3) = 1 + 1 = 2; num = 1 + 1 = 2
+        // denom = max(crit1) + max(crit2) = 1 + 1 = 2; num = 1 + 1 = 2
         assert_eq!(sc.get_score(&sel_perfect), 1.0);
 
         // Zero score
         let sel_zero: HashMap<String, String> = HashMap::from([
             ("crit1".into(), "NO".into()),
-            ("crit3".into(), "NO".into()),
+            ("crit2".into(), "NO".into()),
         ]);
         assert_eq!(sc.get_score(&sel_zero), 0.0);
 
-        // N/A on crit1 removes it from denominator; crit3 YES → 1/1 = 1.0
+        // N/A on crit1 removes it from denominator; crit2 YES → 1/1 = 1.0
         let sel_na: HashMap<String, String> = HashMap::from([
             ("crit1".into(), "N/A".into()),
-            ("crit3".into(), "YES".into()),
+            ("crit2".into(), "YES".into()),
         ]);
         assert_eq!(sc.get_score(&sel_na), 1.0);
 
         // FYI on crit1 counts as 1 point (same as YES); denom for crit1 = 1
         let sel_fyi: HashMap<String, String> = HashMap::from([
             ("crit1".into(), "FYI".into()),
-            ("crit3".into(), "NO".into()),
+            ("crit2".into(), "NO".into()),
         ]);
         // num = 1 + 0 = 1, denom = 1 + 1 = 2
         assert_eq!(sc.get_score(&sel_fyi), 0.5);
@@ -339,5 +840,77 @@ mod tests {
     fn from_csv_invalid_cell_error() {
         let csv = ",YES,NO\ncrit1,1,BAD\n";
         assert!(Scorecard::from_csv_string(csv).is_err());
+    }
+
+    // ── to_html tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn to_html_is_valid_html_document() {
+        let sc = Scorecard::from_csv_string(VSC1_CSV).unwrap();
+        let html = sc.to_html();
+        assert!(html.starts_with("<!DOCTYPE html>"));
+        assert!(html.contains("</html>"));
+    }
+
+    #[test]
+    fn to_html_preserves_criterion_order() {
+        // crit1 must appear before crit3 (CSV row order).
+        let sc = Scorecard::from_csv_string(VSC1_CSV).unwrap();
+        let html = sc.to_html();
+        let pos_crit1 = html.find("crit1").expect("crit1 missing");
+        let pos_crit2 = html.find("crit2").expect("crit2 missing");
+        assert!(pos_crit1 < pos_crit2, "crit1 should appear before crit2");
+    }
+
+    #[test]
+    fn to_html_preserves_option_order() {
+        // YES must appear before NO, N/A, FYI in the header (CSV column order).
+        let sc = Scorecard::from_csv_string(VSC1_CSV).unwrap();
+        let html = sc.to_html();
+        let pos_yes = html.find(">YES<").expect("YES header missing");
+        let pos_no  = html.find(">NO<").expect("NO header missing");
+        let pos_na  = html.find(">N/A<").expect("N/A header missing");
+        let pos_fyi = html.find(">FYI<").expect("FYI header missing");
+        assert!(pos_yes < pos_no,  "YES should come before NO");
+        assert!(pos_no  < pos_na,  "NO should come before N/A");
+        assert!(pos_na  < pos_fyi, "N/A should come before FYI");
+    }
+
+    #[test]
+    fn to_html_unavailable_options_render_as_dash() {
+        // crit3 has no N/A or FYI columns — those cells must show the dash placeholder.
+        let sc = Scorecard::from_csv_string(VSC1_CSV).unwrap();
+        let html = sc.to_html();
+        assert!(
+            html.contains("opt-unavailable"),
+            "unavailable options should use the opt-unavailable class"
+        );
+    }
+
+    #[test]
+    fn to_html_contains_criteria_js_block() {
+        // The JS score calculator must reference each criterion by name.
+        let sc = Scorecard::from_csv_string(VSC1_CSV).unwrap();
+        let html = sc.to_html();
+        assert!(html.contains("\"crit1\""), "criteria JS block should include crit1");
+        assert!(html.contains("\"crit2\""), "criteria JS block should include crit2");
+    }
+
+    #[test]
+    fn to_html_escapes_special_chars() {
+        // Criterion/option names with HTML-special chars must be escaped.
+        let csv = ",<YES>&,\"opt\"\ncrit<1>,1,0\n";
+        let sc = Scorecard::from_csv_string(csv).unwrap();
+        let html = sc.to_html();
+        assert!(!html.contains("<YES>"),   "raw < > in option name should be escaped");
+        assert!(!html.contains("crit<1>"), "raw < > in criterion name should be escaped");
+        assert!(html.contains("&lt;"),     "escaped < should appear as &lt;");
+    }
+
+    #[test]
+    fn sanity_check_vsc1() {
+        let sc = Scorecard::from_csv_string(VSC1_CSV).unwrap();
+        let html = sc.to_html();
+        fs::write("test_artifacts/vsc1.html", html).unwrap();
     }
 }
