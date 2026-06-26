@@ -21,7 +21,6 @@ Sets up the current directory as a QAMS instance with:
 - `reports` directory: will contain reports as HTML representations (initially empty)
 - `scorecard.html`: see [QAMS Review form](./scorecard_html.md)
 - `.qams` hidden directory: contains
-    - Internal representation of the scorecard used to compute future reports
     - Internal representation of past reports used to compute future reports
     - **Note**: on Windows, this should actually be hidden by the `init` command. Feel free to use a subprocess to avoid unnecessary dependencies.
 
