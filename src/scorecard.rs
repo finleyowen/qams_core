@@ -59,6 +59,21 @@ impl ScorecardComponent<&str> for Criterion {
     }
 }
 
+impl Criterion {
+    pub fn get_avg_score(&self, sels: &Vec<&str>) -> f64 {
+        let mut num = 0; let mut denom = 0;
+        for sel in sels {
+            num += self.get_numerator(sel);
+            denom += self.get_denominator(sel);
+        }
+        if denom > 0 {
+            num as f64 / denom as f64
+        } else {
+            100.0
+        }
+    }
+}
+
 pub struct Scorecard {
     criteria: HashMap<String, Criterion>,
     /// Option names in CSV column order (needed for ordered HTML output).
